@@ -29,6 +29,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{info_span, instrument, Instrument};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+use uuid::Uuid;
 
 /// Generate tokens if `stream == false` or a stream of token if `stream == true`
 #[utoipa::path(
@@ -142,6 +143,7 @@ time_per_token,
 seed,
 )
 )]
+
 async fn generate(
     infer: Extension<Infer>,
     Json(req): Json<GenerateRequest>,
@@ -150,6 +152,8 @@ async fn generate(
     let start_time = Instant::now();
     metrics::increment_counter!("tgi_request_count");
 
+    let uuid = Uuid::new_v4();
+    tracing::debug!("UUID for request: {:?}", uuid);
     tracing::debug!("Input: {}", req.inputs);
 
     let compute_characters = req.inputs.chars().count();
@@ -256,6 +260,10 @@ async fn generate(
     headers.insert(
         "x-time-per-token",
         time_per_token.as_millis().to_string().parse().unwrap(),
+    );
+    headers.insert(
+        "x-request-uuid",
+        uuid.to_string().parse().unwrap(),
     );
 
     // Metrics
