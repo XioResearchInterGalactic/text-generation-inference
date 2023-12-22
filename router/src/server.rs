@@ -152,8 +152,8 @@ async fn generate(
     let start_time = Instant::now();
     metrics::increment_counter!("tgi_request_count");
 
-    let uuid = Uuid::new_v4();
-    tracing::debug!("UUID for request: {:?}", uuid);
+    let uid = Uuid::new_v4();
+    tracing::debug!("UUID for request: {:?}", uid);
     tracing::debug!("Input: {}", req.inputs);
 
     let compute_characters = req.inputs.chars().count();
@@ -263,7 +263,7 @@ async fn generate(
     );
     headers.insert(
         "x-request-uuid",
-        uuid.to_string().parse().unwrap(),
+        uid.to_string().parse().unwrap(),
     );
 
     // Metrics

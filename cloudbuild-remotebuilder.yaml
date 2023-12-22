@@ -1,0 +1,14 @@
+steps:
+- name: gcr.io/aip-inference-default-dev/remote-builder:latest
+
+  waitFor: ["-"]
+  env:
+    # Use Container Optimized OS
+    # https://cloud.google.com/container-optimized-os/docs/
+    - INSTANCE_ARGS=--image-project cos-cloud --image-family cos-stable 
+          --boot-disk-type=pd-ssd --machine-type g2-standard-8 
+          --maintenance-policy TERMINATE --restart-on-failure
+    - ZONE=us-central1-a
+    # Run a script from the local build context in a Docker container
+    - COMMAND=docker build -t us-central1-docker.pkg.dev/aip-inference-default-dev/platform-model-artifactory/merlyn/text-generation-inference:latest . && 
+          docker push us-central1-docker.pkg.dev/aip-inference-default-dev/platform-model-artifactory/merlyn/text-generation-inference:latest
