@@ -263,6 +263,9 @@ pub(crate) struct Details {
 pub(crate) struct GenerateResponse {
     #[schema(example = "test")]
     pub generated_text: String,
+    pub inference_time: u64,
+    pub generated_tokens: u32,
+    pub time_per_token: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Details>,
 }

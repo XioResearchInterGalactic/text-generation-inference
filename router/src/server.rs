@@ -298,6 +298,9 @@ async fn generate(
 
     let response = GenerateResponse {
         generated_text: output_text,
+        inference_time: total_time.as_millis() as u64,
+        generated_tokens: response.generated_text.generated_tokens,
+        time_per_token: time_per_token.as_millis() as u64,
         details,
     };
     Ok((headers, Json(response)))
