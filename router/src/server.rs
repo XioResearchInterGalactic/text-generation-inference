@@ -153,7 +153,7 @@ async fn generate(
     metrics::increment_counter!("tgi_request_count");
 
     let uid = Uuid::new_v4();
-    tracing::info!("UUID for request: {:?}", uid);
+    tracing::error!("UUID for request: {:?}", uid);
     tracing::info!("Input: {}", req.inputs);
 
     let compute_characters = req.inputs.chars().count();
