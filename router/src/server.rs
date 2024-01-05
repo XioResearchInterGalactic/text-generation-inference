@@ -595,8 +595,6 @@ pub async fn run(
     )]
     struct ApiDoc;
 
-// Initialize logging 
-    init_logging(None, false);
 
     // Create state
     let validation = Validation::new(
