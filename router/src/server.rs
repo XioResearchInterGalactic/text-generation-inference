@@ -33,12 +33,7 @@ use uuid::Uuid;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
-use opentelemetry::sdk::propagation::TraceContextPropagator;
-use opentelemetry::sdk::trace;
-use opentelemetry::sdk::trace::Sampler;
-use opentelemetry::sdk::Resource;
-use opentelemetry::{global, KeyValue};
-use opentelemetry_otlp::WithExportConfig;
+
 
 /// Generate tokens if `stream == false` or a stream of token if `stream == true`
 #[utoipa::path(

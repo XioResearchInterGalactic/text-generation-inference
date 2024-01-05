@@ -18,6 +18,7 @@ use tower_http::cors::AllowOrigin;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 /// App Configuration
 #[derive(Parser, Debug)]
@@ -295,10 +296,9 @@ fn init_logging(otlp_endpoint: Option<String>, json_output: bool) {
         .with_file(true)
         .with_line_number(true)
         .with_target(false) // Whether to include the target field, you could set this to `true` if needed.
-        .with_span_events(FmtSpan::CLOSE) // Log when spans are closed. Consider FmtSpan::NONE for less verbosity.
         .without_time() // Exclude timestamps if you're already getting them elsewhere
         .with_ansi(false) // Disable ANSI escape codes
-        .with_level(false) // Include the log level;
+        .with_level(false); // Include the log level;
 
     let fmt_layer = match json_output {
         true => fmt_layer.json().flatten_event(true).boxed(),
