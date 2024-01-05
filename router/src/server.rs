@@ -298,7 +298,7 @@ async fn generate(
         output_text = prompt + &output_text;
     }
 
-    tracing::info!("Output: {}, UUID: {}", output_text, uid);
+    tracing::info!("Output: {}, UUID: {?}", output_text, uid);
     tracing::info!("Success");
 
     let response = GenerateResponse {
