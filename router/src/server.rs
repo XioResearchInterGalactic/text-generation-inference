@@ -166,8 +166,8 @@ async fn generate(
     metrics::increment_counter!("tgi_request_count");
 
     let uid = Uuid::new_v4();
-    tracing::error!("UUID for request: {:?}", uid);
-    tracing::info!("Input: {}", req.inputs);
+    tracing::info!("UUID for request: {:?}", uid);
+    tracing::info!("Input: {}, UUID: {:?}", req.inputs, uid);
 
     let compute_characters = req.inputs.chars().count();
     let mut add_prompt = None;
@@ -306,7 +306,7 @@ async fn generate(
         output_text = prompt + &output_text;
     }
 
-    tracing::info!("Output: {}", output_text);
+    tracing::info!("Output: {}, UUID: {:?}", output_text, uid);
     tracing::info!("Success");
 
     let response = GenerateResponse {
