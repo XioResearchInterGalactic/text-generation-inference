@@ -158,7 +158,7 @@ async fn generate(
     Json(req): Json<GenerateRequest>,
 ) -> Result<(HeaderMap, Json<GenerateResponse>), (StatusCode, Json<ErrorResponse>)> {
 
-    #Initialize logging 
+    // Initialize logging 
     init_logging(None, false);
     
     let span = tracing::Span::current();
@@ -595,7 +595,7 @@ pub async fn run(
     )]
     struct ApiDoc;
 
-    #Initialize logging 
+// Initialize logging 
     init_logging(None, false);
 
     // Create state
