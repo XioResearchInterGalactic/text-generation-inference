@@ -159,161 +159,165 @@ async fn generate(
 ) -> Result<(HeaderMap, Json<GenerateResponse>), (StatusCode, Json<ErrorResponse>)> {
 
     // Initialize logging 
-    init_logging(None, false);
+    let subscriber = init_logging(None, false);
     
-    let span = tracing::Span::current();
-    let start_time = Instant::now();
-    metrics::increment_counter!("tgi_request_count");
+    tracing::subscriber::with_default(subscriber, || {
+        // Your code here
+        let span = tracing::Span::current();
+        let start_time = Instant::now();
+        metrics::increment_counter!("tgi_request_count");
 
-    let uid = Uuid::new_v4();
-    tracing::info!("UUID for request: {:?}", uid);
-    tracing::info!("Input: {}, UUID: {:?}", req.inputs, uid);
+        let uid = Uuid::new_v4();
+        tracing::info!("UUID for request: {:?}", uid);
+        tracing::info!("Input: {}, UUID: {:?}", req.inputs, uid);
 
-    let compute_characters = req.inputs.chars().count();
-    let mut add_prompt = None;
-    if req.parameters.return_full_text.unwrap_or(false) {
-        add_prompt = Some(req.inputs.clone());
-    }
-
-    let details: bool = req.parameters.details || req.parameters.decoder_input_details;
-
-    // Inference
-    let (response, best_of_responses) = match req.parameters.best_of {
-        Some(best_of) if best_of > 1 => {
-            let (response, best_of_responses) = infer.generate_best_of(req, best_of).await?;
-            (response, Some(best_of_responses))
+        let compute_characters = req.inputs.chars().count();
+        let mut add_prompt = None;
+        if req.parameters.return_full_text.unwrap_or(false) {
+            add_prompt = Some(req.inputs.clone());
         }
-        _ => (infer.generate(req).await?, None),
-    };
 
-    // Token details
-    let details = match details {
-        true => {
-            // convert best_of_responses
-            let best_of_sequences = best_of_responses.map(|responses: Vec<InferResponse>| {
-                responses
-                    .into_iter()
-                    .map(|response: InferResponse| {
-                        // Add prompt if return_full_text
-                        let mut output_text = response.generated_text.text;
-                        if let Some(prompt) = &add_prompt {
-                            output_text = prompt.clone() + &output_text;
-                        }
+        let details: bool = req.parameters.details || req.parameters.decoder_input_details;
 
-                        BestOfSequence {
-                            generated_text: output_text,
-                            finish_reason: FinishReason::from(
-                                response.generated_text.finish_reason,
-                            ),
-                            generated_tokens: response.generated_text.generated_tokens,
-                            prefill: response.prefill,
-                            tokens: response.tokens,
-                            top_tokens: response.top_tokens,
-                            seed: response.generated_text.seed,
-                        }
-                    })
-                    .collect()
-            });
+        // Inference
+        let (response, best_of_responses) = match req.parameters.best_of {
+            Some(best_of) if best_of > 1 => {
+                let (response, best_of_responses) = infer.generate_best_of(req, best_of).await?;
+                (response, Some(best_of_responses))
+            }
+            _ => (infer.generate(req).await?, None),
+        };
 
-            Some(Details {
-                finish_reason: FinishReason::from(response.generated_text.finish_reason),
-                generated_tokens: response.generated_text.generated_tokens,
-                prefill: response.prefill,
-                tokens: response.tokens,
-                seed: response.generated_text.seed,
-                best_of_sequences,
-                top_tokens: response.top_tokens,
-            })
+        // Token details
+        let details = match details {
+            true => {
+                // convert best_of_responses
+                let best_of_sequences = best_of_responses.map(|responses: Vec<InferResponse>| {
+                    responses
+                        .into_iter()
+                        .map(|response: InferResponse| {
+                            // Add prompt if return_full_text
+                            let mut output_text = response.generated_text.text;
+                            if let Some(prompt) = &add_prompt {
+                                output_text = prompt.clone() + &output_text;
+                            }
+
+                            BestOfSequence {
+                                generated_text: output_text,
+                                finish_reason: FinishReason::from(
+                                    response.generated_text.finish_reason,
+                                ),
+                                generated_tokens: response.generated_text.generated_tokens,
+                                prefill: response.prefill,
+                                tokens: response.tokens,
+                                top_tokens: response.top_tokens,
+                                seed: response.generated_text.seed,
+                            }
+                        })
+                        .collect()
+                });
+
+                Some(Details {
+                    finish_reason: FinishReason::from(response.generated_text.finish_reason),
+                    generated_tokens: response.generated_text.generated_tokens,
+                    prefill: response.prefill,
+                    tokens: response.tokens,
+                    seed: response.generated_text.seed,
+                    best_of_sequences,
+                    top_tokens: response.top_tokens,
+                })
+            }
+            false => None,
+        };
+
+        // Timings
+        let total_time = start_time.elapsed();
+        let validation_time = response.queued - start_time;
+        let queue_time = response.start - response.queued;
+        let inference_time = Instant::now() - response.start;
+        let time_per_token = inference_time / response.generated_text.generated_tokens;
+
+        // Tracing metadata
+        span.record("total_time", format!("{total_time:?}"));
+        span.record("validation_time", format!("{validation_time:?}"));
+        span.record("queue_time", format!("{queue_time:?}"));
+        span.record("inference_time", format!("{inference_time:?}"));
+        span.record("time_per_token", format!("{time_per_token:?}"));
+        span.record("seed", format!("{:?}", response.generated_text.seed));
+
+        // Headers
+        let mut headers = HeaderMap::new();
+        headers.insert("x-compute-type", "gpu+optimized".parse().unwrap());
+        headers.insert(
+            "x-compute-time",
+            total_time.as_millis().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "x-compute-characters",
+            compute_characters.to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "x-total-time",
+            total_time.as_millis().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "x-validation-time",
+            validation_time.as_millis().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "x-queue-time",
+            queue_time.as_millis().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "x-inference-time",
+            inference_time.as_millis().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "x-time-per-token",
+            time_per_token.as_millis().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "x-request-uuid",
+            uid.to_string().parse().unwrap(),
+        );
+
+        // Metrics
+        metrics::increment_counter!("tgi_request_success");
+        metrics::histogram!("tgi_request_duration", total_time.as_secs_f64());
+        metrics::histogram!(
+            "tgi_request_validation_duration",
+            validation_time.as_secs_f64()
+        );
+        metrics::histogram!("tgi_request_queue_duration", queue_time.as_secs_f64());
+        metrics::histogram!(
+            "tgi_request_inference_duration",
+            inference_time.as_secs_f64()
+        );
+        metrics::histogram!(
+            "tgi_request_mean_time_per_token_duration",
+            time_per_token.as_secs_f64()
+        );
+        metrics::histogram!(
+            "tgi_request_generated_tokens",
+            response.generated_text.generated_tokens as f64
+        );
+
+        // Send response
+        let mut output_text = response.generated_text.text;
+        if let Some(prompt) = add_prompt {
+            output_text = prompt + &output_text;
         }
-        false => None,
-    };
 
-    // Timings
-    let total_time = start_time.elapsed();
-    let validation_time = response.queued - start_time;
-    let queue_time = response.start - response.queued;
-    let inference_time = Instant::now() - response.start;
-    let time_per_token = inference_time / response.generated_text.generated_tokens;
+        tracing::info!("Output: {}, UUID: {:?}", output_text, uid);
+        tracing::info!("Success");
 
-    // Tracing metadata
-    span.record("total_time", format!("{total_time:?}"));
-    span.record("validation_time", format!("{validation_time:?}"));
-    span.record("queue_time", format!("{queue_time:?}"));
-    span.record("inference_time", format!("{inference_time:?}"));
-    span.record("time_per_token", format!("{time_per_token:?}"));
-    span.record("seed", format!("{:?}", response.generated_text.seed));
-
-    // Headers
-    let mut headers = HeaderMap::new();
-    headers.insert("x-compute-type", "gpu+optimized".parse().unwrap());
-    headers.insert(
-        "x-compute-time",
-        total_time.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-compute-characters",
-        compute_characters.to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-total-time",
-        total_time.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-validation-time",
-        validation_time.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-queue-time",
-        queue_time.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-inference-time",
-        inference_time.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-time-per-token",
-        time_per_token.as_millis().to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "x-request-uuid",
-        uid.to_string().parse().unwrap(),
-    );
-
-    // Metrics
-    metrics::increment_counter!("tgi_request_success");
-    metrics::histogram!("tgi_request_duration", total_time.as_secs_f64());
-    metrics::histogram!(
-        "tgi_request_validation_duration",
-        validation_time.as_secs_f64()
-    );
-    metrics::histogram!("tgi_request_queue_duration", queue_time.as_secs_f64());
-    metrics::histogram!(
-        "tgi_request_inference_duration",
-        inference_time.as_secs_f64()
-    );
-    metrics::histogram!(
-        "tgi_request_mean_time_per_token_duration",
-        time_per_token.as_secs_f64()
-    );
-    metrics::histogram!(
-        "tgi_request_generated_tokens",
-        response.generated_text.generated_tokens as f64
-    );
-
-    // Send response
-    let mut output_text = response.generated_text.text;
-    if let Some(prompt) = add_prompt {
-        output_text = prompt + &output_text;
-    }
-
-    tracing::info!("Output: {}, UUID: {:?}", output_text, uid);
-    tracing::info!("Success");
-
-    let response = GenerateResponse {
-        generated_text: output_text,
-        details,
-    };
-    Ok((headers, Json(response)))
+        let response = GenerateResponse {
+            generated_text: output_text,
+            details,
+        };
+        Ok((headers, Json(response)))
+    });
+    
 }
 
 /// Generate a stream of token using Server-Sent Events
@@ -906,8 +910,16 @@ fn init_logging(otlp_endpoint: Option<String>, json_output: bool) {
     let env_filter =
         EnvFilter::try_from_env("LOG_LEVEL").unwrap_or_else(|_| EnvFilter::new("info"));
 
-    tracing_subscriber::registry()
+    // tracing_subscriber::registry()
+    //     .with(env_filter)
+    //     .with(layers)
+    //     .init();
+
+    // Create a new subscriber with the desired formatting options
+    let subscriber = tracing_subscriber::registry()
         .with(env_filter)
-        .with(layers)
-        .init();
+        .with(layers);
+
+    subscriber
+
 }
