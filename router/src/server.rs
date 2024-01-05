@@ -161,7 +161,7 @@ async fn generate(
     // Initialize logging 
     let subscriber = init_logging(None, false);
     
-    tracing::subscriber::with_default(subscriber, || {
+    tracing::subscriber::with_default(subscriber, || async {
         // Your code here
         let span = tracing::Span::current();
         let start_time = Instant::now();
