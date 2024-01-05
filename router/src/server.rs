@@ -159,7 +159,7 @@ async fn generate(
 
     let uid = Uuid::new_v4();
     tracing::info!("UUID for request: {:?}", uid);
-    tracing::info!("Input: {}, UUID: {:?}", req.inputs, uid);
+    tracing::info!("Input: {}, UUID: {}", req.inputs, uid);
 
     let compute_characters = req.inputs.chars().count();
     let mut add_prompt = None;
@@ -298,7 +298,7 @@ async fn generate(
         output_text = prompt + &output_text;
     }
 
-    tracing::info!("Output: {}, UUID: {:?}", output_text, uid);
+    tracing::info!("Output: {}, UUID: {}", output_text, uid);
     tracing::info!("Success");
 
     let response = GenerateResponse {
