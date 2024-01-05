@@ -161,7 +161,8 @@ async fn generate(
     // Initialize logging 
     let subscriber = init_logging(None, false);
     
-    tracing::subscriber::with_default(subscriber, || async {
+    tracing::subscriber::with_default(subscriber, || {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
         // Your code here
         let span = tracing::Span::current();
         let start_time = Instant::now();
@@ -316,6 +317,7 @@ async fn generate(
             details,
         };
         Ok((headers, Json(response)))
+    });
     });
     
 }
