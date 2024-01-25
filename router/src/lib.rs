@@ -408,6 +408,8 @@ pub(crate) struct GenerateRequest {
 pub(crate) struct CompatGenerateRequest {
     #[schema(example = "My name is Olivier and I")]
     pub inputs: String,
+    #[schema(nullable = true, example = "1234")]
+    pub x_user_request_id: Option<String>,
     #[serde(default = "default_parameters")]
     pub parameters: GenerateParameters,
     #[serde(default)]
