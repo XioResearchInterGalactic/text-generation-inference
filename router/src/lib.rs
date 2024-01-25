@@ -420,6 +420,7 @@ impl From<CompatGenerateRequest> for GenerateRequest {
         Self {
             inputs: req.inputs,
             parameters: req.parameters,
+            x_user_request_id: None
         }
     }
 }
