@@ -1,8 +1,11 @@
 /// Batching and inference logic
 use crate::validation::{Validation, ValidationError};
-use crate::{Entry, Queue, Token};
-use crate::{GenerateRequest, PrefillToken};
+use crate::{
+    ChatTemplateInputs, Entry, GenerateRequest, GenerateStreamResponse, HubTokenizerConfig,
+    Message, PrefillToken, Queue, Token,
+};
 use futures::future::try_join_all;
+use minijinja::{Environment, ErrorKind, Template};
 use nohash_hasher::IntMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -13,7 +16,7 @@ use text_generation_client::{
 };
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{mpsc, Notify, Semaphore, TryAcquireError};
 use tokio::time::Instant;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
@@ -30,12 +33,23 @@ pub struct Infer {
     shared: Arc<Shared>,
     /// Inference limit
     limit_concurrent_requests: Arc<Semaphore>,
+    /// Chat template (template, bos_token, eos_token)
+    template: (
+        Option<Template<'static, 'static>>,
+        Option<String>,
+        Option<String>,
+    ),
 }
 
 /// Infer shared state
 struct Shared {
     /// Batching background Tokio task notifier
     batching_task: Notify,
+}
+
+/// Raise a exception (custom function) used in the chat templates
+fn raise_exception(err_text: String) -> Result<String, minijinja::Error> {
+    Err(minijinja::Error::new(ErrorKind::SyntaxError, err_text))
 }
 
 impl Infer {
@@ -52,6 +66,7 @@ impl Infer {
         window_size: Option<u32>,
         speculate: u32,
         generation_health: Arc<AtomicBool>,
+        tokenizer_config: HubTokenizerConfig,
     ) -> Self {
         // Infer shared state
         let queue = Queue::new(requires_padding, 16, window_size, speculate);
@@ -74,11 +89,29 @@ impl Infer {
         // Inference limit with a semaphore
         let semaphore = Arc::new(Semaphore::new(max_concurrent_requests));
 
+        let template = tokenizer_config.chat_template.map(|t| {
+            let mut env = Box::new(Environment::new());
+            let template_str = t.into_boxed_str();
+            env.add_function("raise_exception", raise_exception);
+            // leaking env and template_str as read-only, static resources for performance.
+            Box::leak(env)
+                .template_from_str(Box::leak(template_str))
+                .unwrap()
+        });
+        let eos_token = tokenizer_config
+            .eos_token
+            .map_or_else(String::new, |t| t)
+            .into();
+        let bos_token = tokenizer_config
+            .bos_token
+            .map_or_else(String::new, |t| t)
+            .into();
         Self {
             validation,
             queue,
             shared,
             limit_concurrent_requests: semaphore,
+            template: (template, eos_token, bos_token),
         }
     }
 
@@ -87,13 +120,7 @@ impl Infer {
     pub(crate) async fn generate_stream(
         &self,
         request: GenerateRequest,
-    ) -> Result<
-        (
-            OwnedSemaphorePermit,
-            UnboundedReceiverStream<Result<InferStreamResponse, InferError>>,
-        ),
-        InferError,
-    > {
+    ) -> Result<GenerateStreamResponse, InferError> {
         // Limit concurrent requests by acquiring a permit from the semaphore
         let permit = self
             .clone()
@@ -114,6 +141,7 @@ impl Infer {
 
         // MPSC channel to communicate with the background batching task
         let (response_tx, response_rx) = mpsc::unbounded_channel();
+        let input_length = valid_request.input_length;
 
         // Append the request to the queue
         self.queue.append(Entry {
@@ -130,7 +158,30 @@ impl Infer {
         self.shared.batching_task.notify_one();
 
         // Return stream
-        Ok((permit, UnboundedReceiverStream::new(response_rx)))
+        Ok((
+            permit,
+            input_length,
+            UnboundedReceiverStream::new(response_rx),
+        ))
+    }
+
+    /// Apply the chat template to the chat request
+    #[instrument(skip_all)]
+    pub(crate) fn apply_chat_template(&self, messages: Vec<Message>) -> Result<String, InferError> {
+        let (template, bos_token, eos_token) = &self.template;
+        template
+            .as_ref()
+            .ok_or_else(|| InferError::TemplateError(ErrorKind::TemplateNotFound.into()))?
+            .render(ChatTemplateInputs {
+                messages,
+                eos_token: eos_token.as_deref(),
+                bos_token: bos_token.as_deref(),
+            })
+            .map_err(|e| {
+                metrics::increment_counter!("tgi_request_failure", "err" => "template");
+                tracing::error!("{e}");
+                InferError::TemplateError(e)
+            })
     }
 
     /// Add a new request to the queue and return a InferResponse
@@ -142,7 +193,7 @@ impl Infer {
         let use_top_tokens = request.parameters.top_n_tokens.is_some_and(|x| x > 0);
 
         // Create stream and keep semaphore permit as long as generate lives
-        let (_permit, mut stream) = self.generate_stream(request).await?;
+        let (_permit, _input_length, mut stream) = self.generate_stream(request).await?;
 
         // Return values
         let mut result_prefill = Vec::new();
@@ -196,6 +247,7 @@ impl Infer {
         {
             Ok(InferResponse {
                 prefill: result_prefill,
+                _input_length,
                 tokens: result_tokens,
                 generated_text,
                 queued,
@@ -543,9 +595,9 @@ fn send_responses(
     let mut iterator = tokens_
         .ids
         .into_iter()
-        .zip(tokens_.logprobs.into_iter())
-        .zip(tokens_.texts.into_iter())
-        .zip(tokens_.is_special.into_iter())
+        .zip(tokens_.logprobs)
+        .zip(tokens_.texts)
+        .zip(tokens_.is_special)
         .enumerate()
         .peekable();
     while let Some((i, (((id, logprob), text), special))) = iterator.next() {
@@ -636,6 +688,10 @@ pub(crate) enum InferStreamResponse {
 
 #[derive(Debug)]
 pub(crate) struct InferResponse {
+    /// input_length is the input as perceived by the rust tokenizer in the
+    /// validation pathway. It is redundant with prefill.len() but prefill
+    /// has data only if the user asked for it. This will always be filled.
+    pub(crate) _input_length: u32,
     pub(crate) prefill: Vec<PrefillToken>,
     pub(crate) tokens: Vec<Token>,
     pub(crate) generated_text: GeneratedText,
@@ -654,6 +710,8 @@ pub enum InferError {
     ValidationError(#[from] ValidationError),
     #[error("Incomplete generation")]
     IncompleteGeneration,
+    #[error("Template error: {0}")]
+    TemplateError(#[from] minijinja::Error),
 }
 
 impl InferError {
@@ -663,6 +721,209 @@ impl InferError {
             InferError::Overloaded(_) => "overloaded",
             InferError::ValidationError(_) => "validation",
             InferError::IncompleteGeneration => "incomplete_generation",
+            InferError::TemplateError(_) => "template_error",
         }
+    }
+}
+
+// tests
+#[cfg(test)]
+mod tests {
+    use crate::infer::raise_exception;
+    use crate::ChatTemplateInputs;
+    use crate::Message;
+    use minijinja::Environment;
+
+    #[test]
+    fn test_chat_template() {
+        let env = Environment::new();
+
+        let source = r#"
+        {% for message in messages %}
+            {% if message['role'] == 'system' %}
+                {% if message['content']%}
+                    {{'### System:\n' + message['content']+'\n\n'}}
+                {% endif %}
+            {% elif message['role'] == 'user' %}
+                {{'### User:\n' + message['content']+'\n\n'}}
+            {% elif message['role'] == 'assistant' %}
+                {{'### Assistant:\n'  + message['content']}}
+            {% endif %}
+            {% if loop.last and add_generation_prompt %}
+                {{ '### Assistant:\n' }}
+            {% endif %}
+        {% endfor %}"#;
+
+        // trim all the whitespace
+        let source = source
+            .lines()
+            .map(|line| line.trim())
+            .collect::<Vec<&str>>()
+            .join("");
+
+        let tmpl = env.template_from_str(&source);
+
+        let chat_template_inputs = ChatTemplateInputs {
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: "Hi!".to_string(),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: "Hello how can I help?".to_string(),
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: "What is Deep Learning?".to_string(),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: "magic!".to_string(),
+                },
+            ],
+            bos_token: Some("[BOS]"),
+            eos_token: Some("[EOS]"),
+        };
+
+        let result = tmpl.unwrap().render(chat_template_inputs).unwrap();
+
+        assert_eq!(
+            result,
+            r#"### User:
+Hi!
+
+### Assistant:
+Hello how can I help?### User:
+What is Deep Learning?
+
+### Assistant:
+magic!"#
+        );
+    }
+
+    #[test]
+    fn test_chat_template_invalid_with_raise() {
+        let mut env = Environment::new();
+        env.add_function("raise_exception", raise_exception);
+
+        let source = r#"
+        {{ bos_token }}
+        {% for message in messages %}
+        {% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}
+        {{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}
+        {% endif %}
+        {% if message['role'] == 'user' %}
+        {{ '[INST] ' + message['content'] + ' [/INST]' }}
+        {% elif message['role'] == 'assistant' %}
+        {{ message['content'] + eos_token}}
+        {% else %}
+        {{ raise_exception('Only user and assistant roles are supported!') }}
+        {% endif %}
+        {% endfor %}"#;
+
+        // trim all the whitespace
+        let source = source
+            .lines()
+            .map(|line| line.trim())
+            .collect::<Vec<&str>>()
+            .join("");
+
+        let tmpl = env.template_from_str(&source);
+
+        let chat_template_inputs = ChatTemplateInputs {
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: "Hi!".to_string(),
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: "Hi again!".to_string(),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: "Hello how can I help?".to_string(),
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: "What is Deep Learning?".to_string(),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: "magic!".to_string(),
+                },
+            ],
+            bos_token: Some("[BOS]"),
+            eos_token: Some("[EOS]"),
+        };
+
+        let result = tmpl.unwrap().render(chat_template_inputs); //.err().unwrap();
+
+        match result {
+            Ok(_) => panic!("Should have failed"),
+            Err(e) => {
+                assert_eq!(
+                    e.detail().unwrap(),
+                    "Conversation roles must alternate user/assistant/user/assistant/..."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_chat_template_valid_with_raise() {
+        let mut env = Environment::new();
+        env.add_function("raise_exception", raise_exception);
+
+        let source = r#"
+        {{ bos_token }}
+        {% for message in messages %}
+        {% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}
+        {{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}
+        {% endif %}
+        {% if message['role'] == 'user' %}
+        {{ '[INST] ' + message['content'] + ' [/INST]' }}
+        {% elif message['role'] == 'assistant' %}
+        {{ message['content'] + eos_token}}
+        {% else %}
+        {{ raise_exception('Only user and assistant roles are supported!') }}
+        {% endif %}
+        {% endfor %}"#;
+
+        // trim all the whitespace
+        let source = source
+            .lines()
+            .map(|line| line.trim())
+            .collect::<Vec<&str>>()
+            .join("");
+
+        let tmpl = env.template_from_str(&source);
+
+        let chat_template_inputs = ChatTemplateInputs {
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: "Hi!".to_string(),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: "Hello how can I help?".to_string(),
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: "What is Deep Learning?".to_string(),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: "magic!".to_string(),
+                },
+            ],
+            bos_token: Some("[BOS]"),
+            eos_token: Some("[EOS]"),
+        };
+
+        let result = tmpl.unwrap().render(chat_template_inputs).unwrap();
+        assert_eq!(result, "[BOS][INST] Hi! [/INST]Hello how can I help?[EOS][INST] What is Deep Learning? [/INST]magic![EOS]");
     }
 }

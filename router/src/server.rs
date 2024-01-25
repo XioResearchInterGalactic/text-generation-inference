@@ -3,9 +3,10 @@ use crate::health::Health;
 use crate::infer::{InferError, InferResponse, InferStreamResponse};
 use crate::validation::ValidationError;
 use crate::{
-    BestOfSequence, CompatGenerateRequest, Details, ErrorResponse, FinishReason,
-    GenerateParameters, GenerateRequest, GenerateResponse, HubModelInfo, Infer, Info, PrefillToken,
-    StreamDetails, StreamResponse, Token, Validation,
+    BestOfSequence, ChatCompletion, ChatCompletionChunk, ChatRequest, CompatGenerateRequest,
+    Details, ErrorResponse, FinishReason, GenerateParameters, GenerateRequest, GenerateResponse,
+    HubModelInfo, HubTokenizerConfig, Infer, Info, PrefillToken, StreamDetails, StreamResponse,
+    Token, Validation,
 };
 use axum::extract::Extension;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -185,6 +186,7 @@ async fn generate(
     };
 
     // Token details
+    let input_length = response._input_length;
     let details = match details {
         true => {
             // convert best_of_responses
@@ -282,6 +284,11 @@ async fn generate(
             req.x_user_request_id.unwrap().parse().unwrap(),
         );
     }
+    headers.insert("x-prompt-tokens", input_length.into());
+    headers.insert(
+        "x-generated-tokens",
+        response.generated_text.generated_tokens.into(),
+    );
 
     // Metrics
     metrics::increment_counter!("tgi_request_success");
@@ -368,6 +375,21 @@ async fn generate_stream(
     HeaderMap,
     Sse<impl Stream<Item = Result<Event, Infallible>>>,
 ) {
+    let on_message_callback = |stream_token: StreamResponse| {
+        let event = Event::default();
+        event.json_data(stream_token).unwrap()
+    };
+    let (headers, response_stream) =
+        generate_stream_internal(infer, Json(req), on_message_callback).await;
+    let sse = Sse::new(response_stream).keep_alive(KeepAlive::default());
+    (headers, sse)
+}
+
+async fn generate_stream_internal(
+    infer: Infer,
+    Json(req): Json<GenerateRequest>,
+    on_message_callback: impl Fn(StreamResponse) -> Event,
+) -> (HeaderMap, impl Stream<Item = Result<Event, Infallible>>) {
     let span = tracing::Span::current();
     let start_time = Instant::now();
     metrics::increment_counter!("tgi_request_count");
@@ -409,9 +431,11 @@ async fn generate_stream(
         } else {
             match infer.generate_stream(req).instrument(info_span!(parent: &span, "async_stream")).await {
                 // Keep permit as long as generate_stream lives
-                Ok((_permit, mut response_stream)) => {
+                Ok((_permit, _input_length, mut response_stream)) => {
+                    let mut index = 0;
                     // Server-Sent Event stream
                     while let Some(response) = response_stream.next().await {
+                        index += 1;
                         match response {
                             Ok(response) => {
                                 match response {
@@ -426,13 +450,14 @@ async fn generate_stream(
 
                                         // StreamResponse
                                         let stream_token = StreamResponse {
+                                            index,
                                             token,
                                             top_tokens,
                                             generated_text: None,
                                             details: None,
                                         };
-
-                                        yield Ok(Event::default().json_data(stream_token).unwrap())
+                                        let event = on_message_callback(stream_token);
+                                        yield Ok(event);
                                     }
                                     // Yield event for last token and compute timings
                                     InferStreamResponse::End {
@@ -488,13 +513,16 @@ async fn generate_stream(
                                         tracing::info!(parent: &span, "Success");
 
                                         let stream_token = StreamResponse {
+                                            index,
                                             token,
                                             top_tokens,
                                             generated_text: Some(output_text),
                                             details
                                         };
 
-                                        yield Ok(Event::default().json_data(stream_token).unwrap());
+
+                                        let event = on_message_callback(stream_token);
+                                        yield Ok(event);
                                         break;
                                     }
                                 }
@@ -525,7 +553,154 @@ async fn generate_stream(
         }
     };
 
-    (headers, Sse::new(stream).keep_alive(KeepAlive::default()))
+    (headers, stream)
+}
+
+/// Generate tokens
+#[utoipa::path(
+    post,
+    tag = "Text Generation Inference",
+    path = "/v1/chat/completions",
+    request_body = ChatRequest,
+    responses(
+    (status = 200, description = "Generated Text", body = GenerateResponse),
+    (status = 424, description = "Generation Error", body = ErrorResponse,
+    example = json ! ({"error": "Request failed during generation"})),
+    (status = 429, description = "Model is overloaded", body = ErrorResponse,
+    example = json ! ({"error": "Model is overloaded"})),
+    (status = 422, description = "Input validation error", body = ErrorResponse,
+    example = json ! ({"error": "Input validation error"})),
+    (status = 500, description = "Incomplete generation", body = ErrorResponse,
+    example = json ! ({"error": "Incomplete generation"})),
+    )
+    )]
+#[instrument(
+    skip_all,
+    fields(
+    // parameters = ? req.parameters,
+    total_time,
+    validation_time,
+    queue_time,
+    inference_time,
+    time_per_token,
+    seed,
+    )
+    )]
+async fn chat_completions(
+    Extension(infer): Extension<Infer>,
+    Extension(info): Extension<Info>,
+    Json(req): Json<ChatRequest>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    metrics::increment_counter!("tgi_request_count");
+
+    let stream = req.stream;
+    let max_new_tokens = req.max_tokens.or(Some(100));
+    let repetition_penalty = req
+        .frequency_penalty
+        // rescale frequency_penalty from (-2.0, 2.0) to (0.0, 4.0)
+        .map(|x| x + 2.0);
+    let logprobs = req.logprobs.unwrap_or(false);
+    let seed = req.seed;
+
+    // apply chat template to flatten the request into a single input
+    let inputs = match infer.apply_chat_template(req.messages) {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            metrics::increment_counter!("tgi_request_failure", "err" => "validation");
+            tracing::error!("{err}");
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    error: err.to_string(),
+                    error_type: err.error_type().to_string(),
+                }),
+            ));
+        }
+    };
+
+    // build the request passing some parameters
+    let generate_request = GenerateRequest {
+        inputs: inputs.to_string(),
+        parameters: GenerateParameters {
+            best_of: None,
+            temperature: req.temperature,
+            repetition_penalty,
+            top_k: None,
+            top_p: req.top_p,
+            typical_p: None,
+            do_sample: true,
+            max_new_tokens,
+            return_full_text: None,
+            stop: Vec::new(),
+            truncate: None,
+            watermark: false,
+            details: true,
+            decoder_input_details: !stream,
+            seed,
+            top_n_tokens: None,
+        },
+    };
+
+    // static values that will be returned in all cases
+    let model_id = info.model_id.clone();
+    let system_fingerprint = format!("{}-{}", info.version, info.docker_label.unwrap_or("native"));
+
+    // switch on stream
+    if stream {
+        // pass this callback to the stream generation and build the required event structure
+        let on_message_callback = move |stream_token: StreamResponse| {
+            let event = Event::default();
+
+            let current_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+                .as_secs();
+
+            event
+                .json_data(ChatCompletionChunk::new(
+                    model_id.clone(),
+                    system_fingerprint.clone(),
+                    stream_token.token.text,
+                    current_time,
+                    stream_token.index,
+                    logprobs.then_some(stream_token.token.logprob),
+                    stream_token.details.map(|d| d.finish_reason.to_string()),
+                ))
+                .map_or_else(
+                    |e| {
+                        println!("Failed to serialize ChatCompletionChunk: {:?}", e);
+                        Event::default()
+                    },
+                    |data| data,
+                )
+        };
+
+        let (headers, response_stream) =
+            generate_stream_internal(infer, Json(generate_request), on_message_callback).await;
+        let sse = Sse::new(response_stream).keep_alive(KeepAlive::default());
+        Ok((headers, sse).into_response())
+    } else {
+        let (headers, Json(generation)) =
+            generate(Extension(infer), Json(generate_request)).await?;
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+            .as_secs();
+
+        // build the complete response object with the full text
+        let response = ChatCompletion::new(
+            model_id,
+            system_fingerprint,
+            generation.generated_text,
+            current_time,
+            generation.details.unwrap(),
+            logprobs,
+        );
+
+        // wrap generation inside a Vec to match api-inference
+        Ok((headers, Json(response)).into_response())
+    }
 }
 
 /// Prometheus metrics scrape endpoint
@@ -563,6 +738,8 @@ pub async fn run(
     ngrok: bool,
     ngrok_authtoken: Option<String>,
     ngrok_edge: Option<String>,
+    tokenizer_config: HubTokenizerConfig,
+    messages_api_enabled: bool,
 ) -> Result<(), axum::BoxError> {
     // OpenAPI documentation
     #[derive(OpenApi)]
@@ -630,6 +807,7 @@ pub async fn run(
         shard_info.window_size,
         shard_info.speculate,
         generation_health,
+        tokenizer_config,
     );
 
     // Duration buckets
@@ -711,24 +889,32 @@ pub async fn run(
         docker_label: option_env!("DOCKER_LABEL"),
     };
 
-    // Create router
-    let app = Router::new()
-        .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
-        // Base routes
+    // Configure Swagger UI
+    let swagger_ui = SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi());
+
+    // Define base and health routes
+    let base_routes = Router::new()
         .route("/", post(compat_generate))
         .route("/info", get(get_model_info))
         .route("/generate", post(generate))
         .route("/generate_stream", post(generate_stream))
-        // AWS Sagemaker route
-        .route("/invocations", post(compat_generate))
-        // Base Health route
+        .route("/v1/chat/completions", post(chat_completions))
         .route("/health", get(health))
-        // Inference API health route
-        .route("/", get(health))
-        // AWS Sagemaker health route
         .route("/ping", get(health))
-        // Prometheus metrics route
-        .route("/metrics", get(metrics))
+        .route("/metrics", get(metrics));
+
+    // Conditional AWS Sagemaker route
+    let aws_sagemaker_route = if messages_api_enabled {
+        Router::new().route("/invocations", post(chat_completions)) // Use 'chat_completions' for OAI_ENABLED
+    } else {
+        Router::new().route("/invocations", post(compat_generate)) // Use 'compat_generate' otherwise
+    };
+
+    // Combine routes and layers
+    let app = Router::new()
+        .merge(swagger_ui)
+        .merge(base_routes)
+        .merge(aws_sagemaker_route)
         .layer(Extension(info))
         .layer(Extension(health_ext.clone()))
         .layer(Extension(compat_return_full_text))
@@ -848,6 +1034,7 @@ impl From<InferError> for (StatusCode, Json<ErrorResponse>) {
             InferError::Overloaded(_) => StatusCode::TOO_MANY_REQUESTS,
             InferError::ValidationError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             InferError::IncompleteGeneration => StatusCode::INTERNAL_SERVER_ERROR,
+            InferError::TemplateError(_) => StatusCode::UNPROCESSABLE_ENTITY,
         };
 
         (
