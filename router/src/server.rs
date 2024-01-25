@@ -163,8 +163,7 @@ async fn generate(
     
     let user_request_id_exists = req.x_user_request_id.is_some();
     if user_request_id_exists {
-        let user_request_id = req.x_user_request_id.unwrap();
-        tracing::info!("Input: {}, UUID: {}, UserID: {}", req.inputs, uid, user_request_id);
+        tracing::info!("Input: {}, UUID: {}, UserID: {}", req.inputs, uid, req.x_user_request_id.unwrap());
     } else {
         tracing::info!("Input: {}, UUID: {}", req.inputs, uid);
     }
