@@ -412,6 +412,7 @@
           "x_user_request_id": {
             "type": "string",
             "example": "1234",
+            "default": "null",
             "nullable": true
           },
           "parameters": {
@@ -636,6 +637,7 @@
           "x_user_request_id": {
             "type": "string",
             "example": "1234",
+            "default": "null",
             "nullable": true
           },
           "parameters": {
