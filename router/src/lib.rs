@@ -398,6 +398,8 @@ pub(crate) struct Message {
 pub(crate) struct GenerateRequest {
     #[schema(example = "My name is Olivier and I")]
     pub inputs: String,
+    #[schema(example = "1234")]
+    pub x_user_request_id: String,
     #[serde(default = "default_parameters")]
     pub parameters: GenerateParameters,
 }
