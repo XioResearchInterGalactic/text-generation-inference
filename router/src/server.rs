@@ -75,7 +75,7 @@ async fn compat_generate(
             .await
             .into_response())
     } else {
-        let (headers, Json(generation)) = generate(infer, Json(req.into())).await?;
+        let (headers, Json(generation)) = infer.generate(Json(req.into())).await?;
         // wrap generation inside a Vec to match api-inference
         Ok((headers, Json(vec![generation])).into_response())
     }
@@ -683,7 +683,7 @@ async fn chat_completions(
         Ok((headers, sse).into_response())
     } else {
         let (headers, Json(generation)) =
-            generate(Extension(infer), Json(generate_request)).await?;
+            Extension(infer).generate(Json(generate_request)).await?;
 
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
