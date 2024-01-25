@@ -320,7 +320,7 @@ async fn generate(
     if user_request_id_exists {
         tracing::info!("Output: {}, UUID: {}, UserID: {}", output_text, uid, req.x_user_request_id.unwrap());
     } else {
-        tracing::info!("Output: {}, UUID: {?}", output_text, uid);
+        tracing::info!("Output: {}, UUID: {}", output_text, uid);
     }
     tracing::info!("Success");
 
