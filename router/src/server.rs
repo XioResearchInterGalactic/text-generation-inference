@@ -148,13 +148,11 @@ time_per_token,
 seed,
 )
 )]
-
 async fn generate(
     infer: Extension<Infer>,
     Json(req): Json<GenerateRequest>,
 ) -> Result<(HeaderMap, Json<GenerateResponse>), (StatusCode, Json<ErrorResponse>)> {
-    
-    let span = tracing::Span::current();
+        let span = tracing::Span::current();
     let start_time = Instant::now();
     metrics::increment_counter!("tgi_request_count");
 
@@ -330,8 +328,6 @@ async fn generate(
         details,
     };
     Ok((headers, Json(response)))
-
-    
 }
 
 /// Generate a stream of token using Server-Sent Events
@@ -784,7 +780,6 @@ pub async fn run(
     )]
     struct ApiDoc;
 
-
     // Create state
     let validation = Validation::new(
         validation_workers,
@@ -1059,4 +1054,3 @@ impl From<InferError> for Event {
             .unwrap()
     }
 }
-
