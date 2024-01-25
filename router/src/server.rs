@@ -163,7 +163,7 @@ async fn generate(
     
     let user_request_id_exists = req.x_user_request_id.is_some();
     if user_request_id_exists {
-        tracing::info!("Input: {}, UUID: {}, UserID: {}", req.inputs, uid, req.x_user_request_id.unwrap());
+        tracing::info!("Input: {}, UUID: {}, UserID: {}", req.inputs, uid, req.x_user_request_id.as_ref().unwrap());
     } else {
         tracing::info!("Input: {}, UUID: {}", req.inputs, uid);
     }
@@ -280,7 +280,7 @@ async fn generate(
     if user_request_id_exists {
         headers.insert(
             "x-user-request-id",
-            req.x_user_request_id.unwrap().parse().unwrap(),
+            req.x_user_request_id.as_ref().unwrap().parse().unwrap(),
         );
     }
     headers.insert("x-prompt-tokens", input_length.into());
@@ -317,7 +317,7 @@ async fn generate(
     }
 
     if user_request_id_exists {
-        tracing::info!("Output: {}, UUID: {}, UserID: {}", output_text, uid, req.x_user_request_id.unwrap());
+        tracing::info!("Output: {}, UUID: {}, UserID: {}", output_text, uid, req.x_user_request_id.as_ref().unwrap());
     } else {
         tracing::info!("Output: {}, UUID: {}", output_text, uid);
     }
@@ -620,6 +620,7 @@ async fn chat_completions(
     // build the request passing some parameters
     let generate_request = GenerateRequest {
         inputs: inputs.to_string(),
+        x_user_request_id: None,
         parameters: GenerateParameters {
             best_of: None,
             temperature: req.temperature,
