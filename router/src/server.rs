@@ -163,8 +163,10 @@ async fn generate(
     
     let user_request_id_exists = req.x_user_request_id.is_some();
     if user_request_id_exists {
-        tracing::info!("Input: {}, UUID: {}, UserID: {}", req.inputs, uid, req.x_user_request_id.as_ref().unwrap());
+        user_request_id = req.x_user_request_id.as_ref().unwrap()
+        tracing::info!("Input: {}, UUID: {}, UserID: {}", req.inputs, uid, user_request_id);
     } else {
+        user_request_id = "None"
         tracing::info!("Input: {}, UUID: {}", req.inputs, uid);
     }
     let compute_characters = req.inputs.chars().count();
@@ -280,7 +282,7 @@ async fn generate(
     if user_request_id_exists {
         headers.insert(
             "x-user-request-id",
-            req.x_user_request_id.as_ref().unwrap().parse().unwrap(),
+            user_request_id.parse().unwrap(),
         );
     }
     headers.insert("x-prompt-tokens", input_length.into());
@@ -317,7 +319,7 @@ async fn generate(
     }
 
     if user_request_id_exists {
-        tracing::info!("Output: {}, UUID: {}, UserID: {}", output_text, uid, req.x_user_request_id.as_ref().unwrap());
+        tracing::info!("Output: {}, UUID: {}, UserID: {}", output_text, uid, user_request_id);
     } else {
         tracing::info!("Output: {}, UUID: {}", output_text, uid);
     }
