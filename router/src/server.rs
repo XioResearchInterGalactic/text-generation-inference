@@ -159,8 +159,14 @@ async fn generate(
 
     let uid = Uuid::new_v4();
     tracing::info!("UUID for request: {:?}", uid);
-    tracing::info!("Input: {}, UUID: {}", req.inputs, uid);
-
+    
+    let user_request_id_exists = req.x_user_request_id.is_some();
+    if user_request_id_exists {
+        let user_request_id = req.x_user_request_id.unwrap();
+        tracing::info!("Input: {}, UUID: {}, UserID: {}", req.inputs, uid, user_request_id);
+    } else {
+        tracing::info!("Input: {}, UUID: {}", req.inputs, uid);
+    }
     let compute_characters = req.inputs.chars().count();
     let mut add_prompt = None;
     if req.parameters.return_full_text.unwrap_or(false) {
@@ -267,9 +273,15 @@ async fn generate(
         time_per_token.as_millis().to_string().parse().unwrap(),
     );
     headers.insert(
-        "x-request-uuid",
+        "x-request-id",
         uid.to_string().parse().unwrap(),
     );
+    if user_request_id_exists {
+        headers.insert(
+            "x-user-request-id",
+            req.x_user_request_id.unwrap().parse().unwrap(),
+        );
+    }
 
     // Metrics
     metrics::increment_counter!("tgi_request_success");
@@ -298,7 +310,11 @@ async fn generate(
         output_text = prompt + &output_text;
     }
 
-    tracing::info!("Output: {}, UUID: {?}", output_text, uid);
+    if user_request_id_exists {
+        tracing::info!("Output: {}, UUID: {}, UserID: {}", output_text, uid, req.x_user_request_id.unwrap());
+    } else {
+        tracing::info!("Output: {}, UUID: {?}", output_text, uid);
+    }
     tracing::info!("Success");
 
     let response = GenerateResponse {
